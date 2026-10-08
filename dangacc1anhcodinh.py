@@ -40,15 +40,29 @@ def normalize_server(sv_str):
         return f"{val} sao"
     return sv_str.strip()
 
-def find_account_image(images_dir, account):
+def find_account_images(images_dir, account):
     if not account or account in {".", ".."} or os.path.basename(account) != account:
-        return None
+        return []
 
-    for extension in IMAGE_EXTENSIONS:
-        image_path = os.path.join(images_dir, f"{account}{extension}")
-        if os.path.isfile(image_path):
-            return image_path
-    return None
+    if os.path.isfile(images_dir):
+        extension = os.path.splitext(images_dir)[1].lower()
+        return [images_dir] if extension in IMAGE_EXTENSIONS else []
+    if not os.path.isdir(images_dir):
+        return []
+
+    image_paths = []
+    for filename in os.listdir(images_dir):
+        name, extension = os.path.splitext(filename)
+        if extension.lower() not in IMAGE_EXTENSIONS:
+            continue
+        if name == account or (
+            name.startswith(f"{account}_") and name[len(account) + 1:].isdigit()
+        ):
+            image_path = os.path.join(images_dir, filename)
+            if os.path.isfile(image_path):
+                image_paths.append(image_path)
+
+    return sorted(image_paths, key=str.casefold)
 
 class App(tk.Tk):
     def __init__(self):
@@ -151,11 +165,12 @@ class App(tk.Tk):
         self.txt_description = tk.Text(config_frame, width=60, height=3, font=("Segoe UI", 9))
         self.txt_description.grid(row=4, column=1, padx=5, pady=3)
 
-        # Chọn thư mục ảnh theo tài khoản
-        tk.Label(config_frame, text="Thư mục ảnh theo acc:").grid(row=5, column=0, sticky="w", padx=5, pady=3)
+        # Chọn thư mục ảnh theo tài khoản hoặc một ảnh dùng chung
+        tk.Label(config_frame, text="Nguồn ảnh:").grid(row=5, column=0, sticky="w", padx=5, pady=3)
         self.txt_img_dir = ttk.Entry(config_frame, width=60)
         self.txt_img_dir.grid(row=5, column=1, padx=5, pady=3)
         ttk.Button(config_frame, text="Chọn thư mục", command=self._browse_image_folder).grid(row=5, column=2, padx=3, pady=3)
+        ttk.Button(config_frame, text="Chọn ảnh dùng chung", command=self._browse_shared_image).grid(row=5, column=3, padx=3, pady=3)
 
         # Chọn file accs
         tk.Label(config_frame, text="File data (accs.txt):").grid(row=6, column=0, sticky="w", padx=5, pady=3)
@@ -261,7 +276,13 @@ class App(tk.Tk):
             self.txt_description.insert("1.0", config["description"])
 
         img_dir = config.get("img_dir", "")
-        if img_dir and os.path.isdir(img_dir):
+        if img_dir and (
+            os.path.isdir(img_dir)
+            or (
+                os.path.isfile(img_dir)
+                and os.path.splitext(img_dir)[1].lower() in IMAGE_EXTENSIONS
+            )
+        ):
             self.txt_img_dir.delete(0, tk.END)
             self.txt_img_dir.insert(0, img_dir)
 
@@ -318,6 +339,16 @@ class App(tk.Tk):
             self.txt_img_dir.delete(0, tk.END)
             self.txt_img_dir.insert(0, folder)
             self._save_config("img_dir", folder)
+
+    def _browse_shared_image(self):
+        image_path = filedialog.askopenfilename(
+            title="Chọn ảnh dùng chung cho tất cả tài khoản",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.webp")]
+        )
+        if image_path:
+            self.txt_img_dir.delete(0, tk.END)
+            self.txt_img_dir.insert(0, image_path)
+            self._save_config("img_dir", image_path)
 
     def _load_acc_file(self):
         filename = filedialog.askopenfilename(
@@ -376,8 +407,14 @@ class App(tk.Tk):
             messagebox.showwarning("Cảnh báo", "Vui lòng chọn ít nhất 1 Danh mục!")
             return
 
-        if not img_dir or not os.path.isdir(img_dir):
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn thư mục ảnh hợp lệ!")
+        if not img_dir or not (
+            os.path.isdir(img_dir)
+            or (
+                os.path.isfile(img_dir)
+                and os.path.splitext(img_dir)[1].lower() in IMAGE_EXTENSIONS
+            )
+        ):
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn thư mục ảnh hoặc ảnh dùng chung hợp lệ!")
             return
 
         if not acc_path or not os.path.exists(acc_path):
@@ -389,7 +426,7 @@ class App(tk.Tk):
         missing_images = []
         for line in lines:
             parts = [part.strip() for part in line.split("|")]
-            if len(parts) >= 4 and not find_account_image(img_dir, parts[0]):
+            if len(parts) >= 4 and not find_account_images(img_dir, parts[0]):
                 missing_images.append(parts[0])
 
         if missing_images:
@@ -399,7 +436,7 @@ class App(tk.Tk):
             messagebox.showerror(
                 "Thiếu ảnh tài khoản",
                 f"Không tìm thấy ảnh trùng tên cho {len(missing_images)} tài khoản:\n{missing_list}\n\n"
-                "Đặt ảnh trong thư mục đã chọn với tên dạng <tên_acc>.jpg, .jpeg, .png hoặc .webp."
+                "Đặt ảnh trong thư mục đã chọn với tên dạng <tên_acc>.jpg hoặc <tên_acc>_1.jpg, _2.png..."
             )
             return
 
@@ -472,8 +509,8 @@ class App(tk.Tk):
                 ht = normalize_hanhtinh(raw_ht)
 
                 try:
-                    account_img_path = find_account_image(img_dir, tk_acc)
-                    if not account_img_path:
+                    account_img_paths = find_account_images(img_dir, tk_acc)
+                    if not account_img_paths:
                         raise FileNotFoundError(f"Không tìm thấy ảnh cho tài khoản {tk_acc}")
 
                     if idx > 0:
@@ -523,7 +560,7 @@ class App(tk.Tk):
 
                     self.update_status(tk_acc, "🔄 4. Upload ảnh...")
                     file_input = dialog.locator('input[type="file"]').first
-                    await file_input.set_input_files([account_img_path])
+                    await file_input.set_input_files(account_img_paths)
                     await page.wait_for_timeout(delay_ms)
 
                     self.update_status(tk_acc, "🔄 5. Lưu bản nháp...")
@@ -567,8 +604,17 @@ class App(tk.Tk):
     async def _select_mat_option(self, page, label_name, option_text, delay_ms=1000):
         """Hàm chọn Dropdown chuẩn xác trong Dialog kèm delay"""
         dialog = page.locator('div.cdk-overlay-container, mat-dialog-container').last
-        
-        field = dialog.locator(f'mat-form-field:has-text("{label_name}")').first
+
+        control_names = {"Server": "serverId", "Hành tinh": "planet"}
+        control_name = control_names.get(label_name)
+        if control_name:
+            field = dialog.locator(f'mat-select[formcontrolname="{control_name}"]')
+            if await field.count() == 0:
+                field = dialog.locator(f'mat-form-field:has-text("{label_name}")').first
+        else:
+            field = dialog.locator(f'mat-form-field:has-text("{label_name}")').first
+
+        await field.wait_for(state="visible")
         await field.click()
         await page.wait_for_timeout(300)
         
