@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import threading
 import asyncio
 import tkinter as tk
@@ -333,6 +334,27 @@ class App(tk.Tk):
             item_id = self.acc_items[tk_acc]
             self.tree.set(item_id, column="status", value=status_text)
 
+    async def _get_active_dialog(self, page):
+        dialog = page.locator('mat-dialog-container, .mat-dialog-container')
+        if await dialog.count() > 0:
+            return dialog.last
+        return page.locator('div.cdk-overlay-container').last
+
+    async def _fill_dialog_field(self, dialog, label_name, value, timeout_ms=8000, optional=False):
+        field = dialog.locator(
+            f'mat-form-field:has-text("{label_name}") input, '
+            f'mat-form-field:has-text("{label_name}") textarea'
+        ).first
+
+        try:
+            await field.wait_for(state="visible", timeout=timeout_ms)
+            await field.fill(value)
+            return True
+        except Exception:
+            if optional:
+                return False
+            raise
+
     def _browse_image_folder(self):
         folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh theo tên tài khoản")
         if folder:
@@ -525,8 +547,8 @@ class App(tk.Tk):
                     await btn_new.click()
                     await page.wait_for_timeout(delay_ms)
                     
-                    await page.wait_for_selector('div.cdk-overlay-container')
-                    dialog = page.locator('div.cdk-overlay-container').last
+                    await page.wait_for_selector('mat-dialog-container, .mat-dialog-container, div.cdk-overlay-container')
+                    dialog = await self._get_active_dialog(page)
 
                     self.update_status(tk_acc, "🔄 2. Điền Tiêu đề, Giá, Mô tả & Form...")
                     title = custom_title if custom_title else f"Acc {ht} server {sv}"
@@ -542,7 +564,7 @@ class App(tk.Tk):
 
                     # Điền Giá Bán cài đặt từ UI
                     await dialog.locator('mat-form-field:has-text("Giá bán") input').first.fill(price_val)
-                    await dialog.locator('mat-form-field:has-text("Bảo hành") input').first.fill("24")
+                    await self._fill_dialog_field(dialog, "Bảo hành", "24", optional=True)
                     await dialog.locator('mat-form-field:has-text("Tài khoản game") input').first.fill(tk_acc)
                     await dialog.locator('mat-form-field:has-text("Mật khẩu game") input').first.fill(mk)
                     await page.wait_for_timeout(delay_ms)
@@ -551,15 +573,12 @@ class App(tk.Tk):
                     await self._select_mat_option(page, "Server", sv, delay_ms)
                     await self._select_mat_option(page, "Hành tinh", ht, delay_ms)
                     await self._select_mat_option(page, "Dạng đăng ký", "Đăng ký ảo", delay_ms)
-                    
-                    for cat in selected_categories:
-                        await self._select_mat_option(page, "Danh mục", cat, delay_ms)
-                    
-                    await page.keyboard.press("Escape")
+
+                    await self._select_mat_multiple_options(page, "Danh mục (chọn nhiều)", selected_categories, delay_ms)
                     await page.wait_for_timeout(delay_ms)
 
                     self.update_status(tk_acc, "🔄 4. Upload ảnh...")
-                    file_input = dialog.locator('input[type="file"]').first
+                    file_input = dialog.locator('label.sa-file-input input[type="file"]').first
                     await file_input.set_input_files(account_img_paths)
                     await page.wait_for_timeout(delay_ms)
 
@@ -603,31 +622,84 @@ class App(tk.Tk):
 
     async def _select_mat_option(self, page, label_name, option_text, delay_ms=1000):
         """Hàm chọn Dropdown chuẩn xác trong Dialog kèm delay"""
-        dialog = page.locator('div.cdk-overlay-container, mat-dialog-container').last
+        dialog = await self._get_active_dialog(page)
 
-        control_names = {"Server": "serverId", "Hành tinh": "planet"}
+        control_names = {"Server": "serverId", "Hành tinh": "planet", "Danh mục": "categoryIds", "Danh mục (chọn nhiều)": "categoryIds"}
         control_name = control_names.get(label_name)
         if control_name:
             field = dialog.locator(f'mat-select[formcontrolname="{control_name}"]')
+        else:
+            field = dialog.locator(f'mat-form-field:has-text("{label_name}") mat-select').first
             if await field.count() == 0:
-                field = dialog.locator(f'mat-form-field:has-text("{label_name}")').first
-        else:
-            field = dialog.locator(f'mat-form-field:has-text("{label_name}")').first
+                field = dialog.locator('mat-select').filter(has_text=label_name).first
 
+        await field.scroll_into_view_if_needed()
         await field.wait_for(state="visible")
-        await field.click()
-        await page.wait_for_timeout(300)
-        
-        option = page.locator(f'mat-option:has-text("{option_text}")').or_(
-            page.locator(f'span.mat-option-text:has-text("{option_text}")')
-        )
-        if await option.count() > 0:
-            await option.first.click()
+
+        trigger = field.locator('div.mat-select-trigger')
+        if await trigger.count() > 0:
+            await trigger.first.click()
         else:
-            checkbox = page.locator(f'span:has-text("{option_text}")')
-            if await checkbox.count() > 0:
-                await checkbox.first.click()
+            await field.click()
+
+        await page.wait_for_selector(
+            'div[role="listbox"] mat-option, .mat-select-panel mat-option',
+            timeout=8000
+        )
+        
+        option_pattern = re.compile(rf"^{re.escape(option_text)}$", re.I)
+        option = page.get_by_role('option', name=option_pattern)
+        if await option.count() == 0:
+            option = page.locator('div[role="listbox"] mat-option').filter(has_text=option_pattern)
+        if await option.count() == 0 and label_name == "Server":
+            loose_server_pattern = re.compile(re.escape(option_text), re.I)
+            option = page.get_by_role('option', name=loose_server_pattern)
+        if await option.count() > 0:
+            await option.first.scroll_into_view_if_needed()
+            await option.first.click(force=True)
+        else:
+            text_node = page.locator('div[role="listbox"] span.mat-option-text').filter(has_text=option_pattern)
+            if await text_node.count() > 0:
+                await text_node.first.click(force=True)
+        try:
+            await page.wait_for_selector('div[role="listbox"]', state='detached', timeout=2000)
+        except Exception:
+            pass
         await page.wait_for_timeout(300)
+
+    async def _select_mat_multiple_options(self, page, label_name, option_texts, delay_ms=1000):
+        """Hàm chọn nhiều option trong một mat-select multiple"""
+        if not option_texts:
+            return
+
+        dialog = await self._get_active_dialog(page)
+        field = dialog.locator('mat-select[formcontrolname="categoryIds"]')
+        await field.scroll_into_view_if_needed()
+        await field.wait_for(state="visible")
+
+        trigger = field.locator('div.mat-select-trigger')
+        if await trigger.count() > 0:
+            await trigger.first.click()
+        else:
+            await field.click()
+
+        await page.wait_for_selector('div[role="listbox"] mat-option, .mat-select-panel mat-option', timeout=8000)
+
+        for option_text in option_texts:
+            option_pattern = re.compile(rf"^{re.escape(option_text)}$", re.I)
+            option = page.get_by_role('option', name=option_pattern)
+            if await option.count() == 0:
+                option = page.locator('div[role="listbox"] mat-option').filter(has_text=option_pattern)
+            if await option.count() == 0:
+                option = page.locator('div[role="listbox"] span.mat-option-text').filter(has_text=option_pattern)
+
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await option.first.click(force=True)
+                await page.wait_for_timeout(250)
+
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(delay_ms)
 
 if __name__ == "__main__":
     app = App()
